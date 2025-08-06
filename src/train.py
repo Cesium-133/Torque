@@ -6,7 +6,7 @@ from pathlib import Path
 from joblib import dump
 from tqdm import tqdm
 
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.utils import to_categorical
@@ -142,6 +142,204 @@ def custom_multi_output_loss(y_true_list, y_pred_list, m_frames=2):
     
     return total_loss / m_frames
 
+def train_with_cross_validation(X_scaled, y_windows, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES):
+    """使用交叉验证进行训练"""
+    N_FOLDS = 5
+    kfold = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+    fold_results = []
+    
+    print(f"\n开始 {N_FOLDS}-Fold 交叉验证...")
+    
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(X_scaled)):
+        print(f"\n{'='*50}")
+        print(f"Fold {fold + 1}/{N_FOLDS}")
+        print(f"{'='*50}")
+        
+        # 分割数据
+        X_train, X_val = X_scaled[train_idx], X_scaled[val_idx]
+        y_train, y_val = y_windows[train_idx], y_windows[val_idx]
+        
+        print(f"训练集大小: {X_train.shape[0]}, 验证集大小: {X_val.shape[0]}")
+        
+        # 训练单个fold
+        val_loss, val_accuracy = train_single_fold(
+            X_train, X_val, y_train, y_val, args, model_name_base, 
+            saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES, fold
+        )
+        
+        fold_results.append({
+            'fold': fold + 1,
+            'val_loss': val_loss,
+            'val_accuracy': val_accuracy
+        })
+        
+        print(f"Fold {fold + 1} - 验证损失: {val_loss:.4f}, 验证准确率: {val_accuracy:.4f}")
+    
+    # 汇总结果
+    print_cv_results(fold_results, model_name_base, saved_models_dir, args, N_FRAMES, M_FRAMES)
+
+def train_simple_split(X_scaled, y_windows, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES):
+    """使用简单的训练验证分割进行训练"""
+    print(f"\n使用简单的训练验证分割 (训练集: {args.train_split:.1%}, 验证集: {1-args.train_split:.1%})...")
+    
+    # 分割数据
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_scaled, y_windows, 
+        test_size=1-args.train_split, 
+        random_state=42, 
+        stratify=y_windows[:, 0] if len(y_windows.shape) > 1 else y_windows  # 根据第一帧标签分层
+    )
+    
+    print(f"训练集大小: {X_train.shape[0]}, 验证集大小: {X_val.shape[0]}")
+    
+    # 训练模型
+    val_loss, val_accuracy = train_single_fold(
+        X_train, X_val, y_train, y_val, args, model_name_base, 
+        saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES, fold=None
+    )
+    
+    print(f"\n{'='*60}")
+    print("简单分割训练结果")
+    print(f"{'='*60}")
+    print(f"验证损失: {val_loss:.4f}")
+    print(f"验证准确率: {val_accuracy:.4f}")
+    
+    # 保存结果
+    results_file = saved_models_dir / f"{model_name_base}_simple_split_results.txt"
+    with open(results_file, 'w', encoding='utf-8') as f:
+        f.write("Simple Train-Validation Split Results\n")
+        f.write(f"Model: {args.model_type}\n")
+        f.write(f"N_frames: {N_FRAMES}, M_frames: {M_FRAMES}\n")
+        f.write(f"Train Split: {args.train_split:.1%}\n")
+        f.write(f"Validation Loss: {val_loss:.4f}\n")
+        f.write(f"Validation Accuracy: {val_accuracy:.4f}\n")
+    
+    print(f"\n结果已保存至: {results_file}")
+
+def train_single_fold(X_train, X_val, y_train, y_val, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES, fold=None):
+    """训练单个fold或单次训练"""
+    
+    # 准备标签数据
+    if M_FRAMES == 1:
+        # 单输出情况
+        y_train_cat = to_categorical(y_train.squeeze(), num_classes=3)
+        y_val_cat = to_categorical(y_val.squeeze(), num_classes=3)
+    else:
+        # 多输出情况
+        y_train_cat = [to_categorical(y_train[:, i], num_classes=3) for i in range(M_FRAMES)]
+        y_val_cat = [to_categorical(y_val[:, i], num_classes=3) for i in range(M_FRAMES)]
+    
+    # 构建和编译模型
+    model = create_torque_classifier(
+        input_shape=(N_FRAMES, n_features),
+        num_classes=3,
+        model_type=args.model_type,
+        n_frames=N_FRAMES,
+        m_frames=M_FRAMES
+    )
+    
+    # 获取优化器和学习率调度器
+    optimizer = get_optimizer(args.optimizer, args.learning_rate)
+    lr_scheduler = get_lr_scheduler(patience=args.lr_patience)
+    
+    # 编译模型
+    if M_FRAMES == 1:
+        model.compile(
+            optimizer=optimizer,
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+    else:
+        # 多输出情况
+        model.compile(
+            optimizer=optimizer,
+            loss=['categorical_crossentropy'] * M_FRAMES,
+            loss_weights=[1.0] * M_FRAMES,  # 等权重
+            metrics=['accuracy'] * M_FRAMES
+        )
+    
+    if fold is None or fold == 0:  # 只在第一折或单次训练时显示模型结构
+        model.summary()
+    
+    # 设置回调函数
+    if fold is not None:
+        log_dir = logs_dir / "fit" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_fold{fold+1}"
+        model_path = saved_models_dir / f"{model_name_base}_fold{fold+1}_model.h5"
+    else:
+        log_dir = logs_dir / "fit" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_simple_split"
+        model_path = saved_models_dir / f"{model_name_base}_model.h5"
+    
+    callbacks_list = [
+        ModelCheckpoint(
+            filepath=model_path,
+            monitor='val_loss',
+            save_best_only=True,
+            verbose=1,
+            mode='min'
+        ),
+        EarlyStopping(
+            monitor='val_loss',
+            patience=args.early_stopping_patience,
+            verbose=1,
+            mode='min',
+            restore_best_weights=True
+        ),
+        TensorBoard(log_dir=log_dir, histogram_freq=1),
+        lr_scheduler
+    ]
+    
+    # 训练模型
+    fold_text = f"Fold {fold + 1}" if fold is not None else "模型"
+    print(f"\n开始训练 {fold_text}...")
+    history = model.fit(
+        X_train, y_train_cat,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        validation_data=(X_val, y_val_cat),
+        callbacks=callbacks_list,
+        verbose=1
+    )
+    
+    # 评估模型
+    print(f"\n评估 {fold_text}...")
+    val_loss, val_accuracy = model.evaluate(X_val, y_val_cat, verbose=0)[:2]
+    
+    # 清理内存
+    del model
+    tf.keras.backend.clear_session()
+    
+    return val_loss, val_accuracy
+
+def print_cv_results(fold_results, model_name_base, saved_models_dir, args, N_FRAMES, M_FRAMES):
+    """打印交叉验证结果"""
+    print(f"\n{'='*60}")
+    print("5-Fold 交叉验证结果汇总")
+    print(f"{'='*60}")
+    
+    avg_loss = np.mean([r['val_loss'] for r in fold_results])
+    avg_accuracy = np.mean([r['val_accuracy'] for r in fold_results])
+    std_loss = np.std([r['val_loss'] for r in fold_results])
+    std_accuracy = np.std([r['val_accuracy'] for r in fold_results])
+    
+    for result in fold_results:
+        print(f"Fold {result['fold']}: Loss={result['val_loss']:.4f}, Accuracy={result['val_accuracy']:.4f}")
+    
+    print(f"\n平均验证损失: {avg_loss:.4f} ± {std_loss:.4f}")
+    print(f"平均验证准确率: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+    
+    # 保存结果
+    results_file = saved_models_dir / f"{model_name_base}_cv_results.txt"
+    with open(results_file, 'w', encoding='utf-8') as f:
+        f.write("5-Fold Cross Validation Results\n")
+        f.write(f"Model: {args.model_type}\n")
+        f.write(f"N_frames: {N_FRAMES}, M_frames: {M_FRAMES}\n")
+        f.write(f"Average Loss: {avg_loss:.4f} ± {std_loss:.4f}\n")
+        f.write(f"Average Accuracy: {avg_accuracy:.4f} ± {std_accuracy:.4f}\n\n")
+        for result in fold_results:
+            f.write(f"Fold {result['fold']}: Loss={result['val_loss']:.4f}, Accuracy={result['val_accuracy']:.4f}\n")
+    
+    print(f"\n结果已保存至: {results_file}")
+
 def main(args):
     # --- 1. 定义路径和参数 ---
     project_root = Path(__file__).parent.parent
@@ -157,9 +355,9 @@ def main(args):
     N_FRAMES = args.n_frames  # 输入历史帧数
     M_FRAMES = args.m_frames  # 预测未来帧数
     STEP_SIZE = 1  # 滑动窗口步长
-    N_FOLDS = 5  # 交叉验证折数
 
     print(f"超参数设置: N_FRAMES={N_FRAMES}, M_FRAMES={M_FRAMES}, STEP_SIZE={STEP_SIZE}")
+    print(f"训练模式: {'5-Fold 交叉验证' if args.use_cross_validation else '简单训练验证分割'}")
 
     # --- 2. 加载数据 ---
     print("开始加载数据...")
@@ -207,143 +405,11 @@ def main(args):
     dump(scaler, scaler_path)
     print(f"Scaler saved to {scaler_path}")
 
-    # --- 5. 5-Fold 交叉验证 ---
-    kfold = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
-    fold_results = []
-    
-    print(f"\n开始 {N_FOLDS}-Fold 交叉验证...")
-    
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(X_scaled)):
-        print(f"\n{'='*50}")
-        print(f"Fold {fold + 1}/{N_FOLDS}")
-        print(f"{'='*50}")
-        
-        # 分割数据
-        X_train, X_val = X_scaled[train_idx], X_scaled[val_idx]
-        y_train, y_val = y_windows[train_idx], y_windows[val_idx]
-        
-        print(f"训练集大小: {X_train.shape[0]}, 验证集大小: {X_val.shape[0]}")
-        
-        # 准备标签数据
-        if M_FRAMES == 1:
-            # 单输出情况
-            y_train_cat = to_categorical(y_train.squeeze(), num_classes=3)
-            y_val_cat = to_categorical(y_val.squeeze(), num_classes=3)
-        else:
-            # 多输出情况
-            y_train_cat = [to_categorical(y_train[:, i], num_classes=3) for i in range(M_FRAMES)]
-            y_val_cat = [to_categorical(y_val[:, i], num_classes=3) for i in range(M_FRAMES)]
-        
-        # --- 6. 构建和编译模型 ---
-        model = create_torque_classifier(
-            input_shape=(N_FRAMES, n_features),
-            num_classes=3,
-            model_type=args.model_type,
-            n_frames=N_FRAMES,
-            m_frames=M_FRAMES
-        )
-        
-        # 获取优化器和学习率调度器
-        optimizer = get_optimizer(args.optimizer, args.learning_rate)
-        lr_scheduler = get_lr_scheduler(patience=args.lr_patience)
-        
-        # 编译模型
-        if M_FRAMES == 1:
-            model.compile(
-                optimizer=optimizer,
-                loss='categorical_crossentropy',
-                metrics=['accuracy']
-            )
-        else:
-            # 多输出情况
-            model.compile(
-                optimizer=optimizer,
-                loss=['categorical_crossentropy'] * M_FRAMES,
-                loss_weights=[1.0] * M_FRAMES,  # 等权重
-                metrics=['accuracy']
-            )
-        
-        if fold == 0:  # 只在第一折显示模型结构
-            model.summary()
-        
-        # --- 7. 设置回调函数 ---
-        log_dir = logs_dir / "fit" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_fold{fold+1}"
-        model_path = saved_models_dir / f"{model_name_base}_fold{fold+1}_model.h5"
-        
-        callbacks_list = [
-            ModelCheckpoint(
-                filepath=model_path,
-                monitor='val_loss',
-                save_best_only=True,
-                verbose=1,
-                mode='min'
-            ),
-            EarlyStopping(
-                monitor='val_loss',
-                patience=args.early_stopping_patience,
-                verbose=1,
-                mode='min',
-                restore_best_weights=True
-            ),
-            TensorBoard(log_dir=log_dir, histogram_freq=1),
-            lr_scheduler
-        ]
-        
-        # --- 8. 训练模型 ---
-        print(f"\n开始训练 Fold {fold + 1}...")
-        history = model.fit(
-            X_train, y_train_cat,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            validation_data=(X_val, y_val_cat),
-            callbacks=callbacks_list,
-            verbose=1
-        )
-        
-        # --- 9. 评估模型 ---
-        print(f"\n评估 Fold {fold + 1}...")
-        val_loss, val_accuracy = model.evaluate(X_val, y_val_cat, verbose=0)[:2]
-        
-        fold_results.append({
-            'fold': fold + 1,
-            'val_loss': val_loss,
-            'val_accuracy': val_accuracy
-        })
-        
-        print(f"Fold {fold + 1} - 验证损失: {val_loss:.4f}, 验证准确率: {val_accuracy:.4f}")
-        
-        # 清理内存
-        del model
-        tf.keras.backend.clear_session()
-    
-    # --- 10. 汇总结果 ---
-    print(f"\n{'='*60}")
-    print("5-Fold 交叉验证结果汇总")
-    print(f"{'='*60}")
-    
-    avg_loss = np.mean([r['val_loss'] for r in fold_results])
-    avg_accuracy = np.mean([r['val_accuracy'] for r in fold_results])
-    std_loss = np.std([r['val_loss'] for r in fold_results])
-    std_accuracy = np.std([r['val_accuracy'] for r in fold_results])
-    
-    for result in fold_results:
-        print(f"Fold {result['fold']}: Loss={result['val_loss']:.4f}, Accuracy={result['val_accuracy']:.4f}")
-    
-    print(f"\n平均验证损失: {avg_loss:.4f} ± {std_loss:.4f}")
-    print(f"平均验证准确率: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-    
-    # 保存结果
-    results_file = saved_models_dir / f"{model_name_base}_cv_results.txt"
-    with open(results_file, 'w', encoding='utf-8') as f:
-        f.write("5-Fold Cross Validation Results\n")
-        f.write(f"Model: {args.model_type}\n")
-        f.write(f"N_frames: {N_FRAMES}, M_frames: {M_FRAMES}\n")
-        f.write(f"Average Loss: {avg_loss:.4f} ± {std_loss:.4f}\n")
-        f.write(f"Average Accuracy: {avg_accuracy:.4f} ± {std_accuracy:.4f}\n\n")
-        for result in fold_results:
-            f.write(f"Fold {result['fold']}: Loss={result['val_loss']:.4f}, Accuracy={result['val_accuracy']:.4f}\n")
-    
-    print(f"\n结果已保存至: {results_file}")
+    # --- 5. 选择训练模式 ---
+    if args.use_cross_validation:
+        train_with_cross_validation(X_scaled, y_windows, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES)
+    else:
+        train_simple_split(X_scaled, y_windows, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a GRU-based sequence prediction model with 5-fold cross validation.")
@@ -363,7 +429,7 @@ if __name__ == '__main__':
     # 训练相关参数
     parser.add_argument("--epochs", type=int, default=200,
                         help="Maximum number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32,
+    parser.add_argument("--batch_size", type=int, default=128,
                         help="Training batch size.")
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw"],
                         help="Optimizer type.")
@@ -375,6 +441,14 @@ if __name__ == '__main__':
                         help="Early stopping patience.")
     parser.add_argument("--lr_patience", type=int, default=10,
                         help="Learning rate scheduler patience.")
+    
+    # 训练模式相关参数
+    parser.add_argument("--use_cross_validation", action="store_true", default=True,
+                        help="Use 5-fold cross validation for training (default: True).")
+    parser.add_argument("--no_cross_validation", dest="use_cross_validation", action="store_false",
+                        help="Use simple train-validation split instead of cross validation.")
+    parser.add_argument("--train_split", type=float, default=0.8,
+                        help="Training set ratio when not using cross validation (default: 0.8).")
     
     args = parser.parse_args()
     main(args)

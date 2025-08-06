@@ -74,29 +74,54 @@ model = create_torque_classifier(
 ```
 
 ### 2. 训练模块 (`src/train.py`)
-负责数据加载、预处理、模型训练和评估。
+负责数据加载、预处理、模型训练和评估。支持两种训练模式：5-Fold交叉验证和简单训练验证分割。
 
 **主要功能:**
 - 从H5文件加载扭矩数据
+- 滑动窗口样本生成
 - 自动序列长度标准化（填充/截断）
 - 数据标准化和标签编码
+- 支持多种训练模式（交叉验证/简单分割）
 - 模型训练和验证
 - 自动保存最佳模型和标准化器
 
 **使用方法:**
 ```bash
-# 使用默认参数训练CNN模型
+# 使用默认参数训练CNN模型（5-Fold交叉验证）
 python src/train.py --data_path data/raw/train+val --model_type cnn
 
-# 训练LSTM模型，指定训练轮数和批大小
-python src/train.py --data_path data/raw/train+val --model_type lstm --epochs 100 --batch_size 64
+# 使用简单训练验证分割（更快的训练）
+python src/train.py --data_path data/raw/train+val --model_type cnn --no_cross_validation
+
+# 训练LSTM模型，指定训练轮数和批大小，自定义训练验证比例
+python src/train.py --data_path data/raw/train+val --model_type lstm --epochs 100 --batch_size 64 --no_cross_validation --train_split 0.85
+
+# 滑动窗口参数调整
+python src/train.py --data_path data/raw/train+val --model_type cnn --n_frames 15 --m_frames 1
 ```
 
 **参数说明:**
+
+*数据相关:*
 - `--data_path`: 数据目录路径，应包含left/mid/right三个子文件夹
-- `--model_type`: 模型类型，可选 'cnn', 'lstm', 'flatten'
+- `--n_frames`: 输入历史帧数（默认10）
+- `--m_frames`: 预测未来帧数（默认2）
+
+*模型相关:*
+- `--model_type`: 模型类型，可选 'cnn', 'lstm', 'gru', 'flatten'
+- `--optimizer`: 优化器类型，可选 'adam', 'adamw'（默认adamw）
+- `--learning_rate`: 初始学习率（默认0.001）
+
+*训练相关:*
 - `--epochs`: 最大训练轮数（默认200）
 - `--batch_size`: 批处理大小（默认32）
+- `--early_stopping_patience`: 早停耐心值（默认15）
+- `--lr_patience`: 学习率调度器耐心值（默认10）
+
+*训练模式:*
+- `--use_cross_validation`: 使用5-Fold交叉验证（默认True）
+- `--no_cross_validation`: 使用简单训练验证分割（更快）
+- `--train_split`: 简单分割时的训练集比例（默认0.8）
 
 ### 3. 推理模块 (`src/infer.py`)
 用于对新的H5文件进行分类预测。
@@ -165,12 +190,22 @@ tensorboard --logdir logs/
 pip install tensorflow>=2.8.0
 ```
 
-### 2. CUDA内存不足
+### 2. CUDA警告信息
+训练时可能出现以下CUDA相关警告，这些警告不影响训练过程：
+```
+Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+```
+这些是TensorFlow的内部警告，可以安全忽略。
+
+### 3. CUDA内存不足
 如果GPU内存不足，可以：
 - 减小批处理大小：`--batch_size 16`
+- 减少滑动窗口帧数：`--n_frames 8`
 - 使用CPU训练：设置环境变量 `CUDA_VISIBLE_DEVICES=""`
 
-### 3. 数据加载失败
+### 4. 数据加载失败
 请检查：
 - H5文件路径是否正确
 - H5文件是否包含正确的数据结构

@@ -61,7 +61,8 @@ python src/train.py \
     --learning_rate "$LEARNING_RATE" \
     --early_stopping_patience "$EARLY_STOPPING_PATIENCE" \
     --lr_patience "$LR_PATIENCE" \
-    --data_path "$DATA_PATH"
+    --data_path "$DATA_PATH" \
+    --no_cross_validation 
 
 echo "========================================"
 echo "Training script finished."

@@ -43,23 +43,6 @@ def create_torque_classifier(input_shape=(10, 7), num_classes=3, model_type='gru
         x = Dropout(0.2, name='dropout_2')(x)
         x = Dense(32, activation='relu', name='dense_2')(x)
 
-    elif model_type == 'flatten':
-        # 方案 A: 压平 + 全连接 (保留兼容性)
-        print("Building Flatten model...")
-        x = Flatten()(x)
-        x = Dense(64, activation='relu')(x)
-        x = Dropout(0.3)(x)
-        x = Dense(32, activation='relu')(x)
-    
-    elif model_type == 'cnn':
-        # 方案 B: 1D CNN (保留兼容性)
-        print("Building 1D CNN model...")
-        x = Conv1D(filters=32, kernel_size=5, activation='relu')(x)
-        x = Conv1D(filters=64, kernel_size=5, activation='relu')(x)
-        x = GlobalMaxPooling1D()(x)
-        x = Dropout(0.5)(x)
-        x = Dense(64, activation='relu')(x)
-
     elif model_type == 'lstm':
         # 方案 C: LSTM (保留兼容性)
         print("Building LSTM model...")
