@@ -1,3 +1,6 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 import h5py
 import numpy as np
 import argparse
@@ -5,17 +8,13 @@ from pathlib import Path
 from joblib import load
 import tensorflow as tf
 from tqdm import tqdm
-
-# 将数字类别映射到有意义的标签
-CLASS_MAP = {
-    0: 'left',
-    1: 'mid', 
-    2: 'right'
-}
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.offline as pyo
 
 def load_and_preprocess_single_file(file_path: Path, scaler, n_frames: int, target_length: int = 150):
     """
-    加载单个H5文件，并应用与训练时完全相同的预处理。
+    加载单个H5文件，并应用与训练时完全相同的预处理（回归任务）。
     
     Args:
         file_path (Path): H5文件路径
@@ -24,48 +23,39 @@ def load_and_preprocess_single_file(file_path: Path, scaler, n_frames: int, targ
         target_length (int): 目标序列长度
         
     Returns:
-        tuple: (processed_sequences, original_labels) 处理后的序列和原始标签
+        tuple: (processed_sequences, positions) 处理后的序列和位置编码
     """
     with h5py.File(file_path, 'r') as f:
-        if '/right_arm_effort' not in f or '/labels' not in f:
+        if '/right_arm_effort' not in f:
             raise ValueError(f"在文件 {file_path.name} 中没有找到所需的数据结构。")
         
         # 加载数据
         effort_data = f['/right_arm_effort'][:]  # (seq_len, 7)
-        label_data = f['/labels'][:]  # (seq_len,)
-    
-    # 确保数据长度一致
-    min_len = min(len(effort_data), len(label_data))
-    effort_data = effort_data[:min_len]
-    label_data = label_data[:min_len]
     
     # Padding或截断到目标长度
     if len(effort_data) > target_length:
         effort_data = effort_data[:target_length]
-        label_data = label_data[:target_length]
     elif len(effort_data) < target_length:
         pad_length = target_length - len(effort_data)
         effort_pad = np.zeros((pad_length, effort_data.shape[1]))
-        label_pad = np.full(pad_length, label_data[-1])
-        
         effort_data = np.concatenate([effort_data, effort_pad], axis=0)
-        label_data = np.concatenate([label_data, label_pad], axis=0)
     
     # 创建滑动窗口序列用于推理
     sequences = []
-    valid_positions = []  # 记录有效的预测位置
+    positions = []
     
     seq_len = len(effort_data)
     for start_idx in range(seq_len - n_frames + 1):
         input_window = effort_data[start_idx:start_idx + n_frames]  # (n_frames, n_features)
         sequences.append(input_window)
-        valid_positions.append(start_idx + n_frames - 1)  # 预测位置是窗口的最后一个位置
+        positions.append(start_idx)  # 位置编码
     
     if not sequences:
         raise ValueError(f"序列长度 {seq_len} 小于所需的输入帧数 {n_frames}")
     
     # 转换为numpy数组并标准化
     sequences = np.array(sequences)  # (n_windows, n_frames, n_features)
+    positions = np.array(positions)  # (n_windows,)
     n_windows, n_frames_check, n_features = sequences.shape
     
     # 标准化
@@ -73,46 +63,173 @@ def load_and_preprocess_single_file(file_path: Path, scaler, n_frames: int, targ
     sequences_scaled = scaler.transform(sequences_reshaped)
     sequences_final = sequences_scaled.reshape(n_windows, n_frames_check, n_features)
     
-    return sequences_final, label_data, valid_positions
+    return sequences_final, positions
 
-def predict_sequence(model, sequences, m_frames=2):
+def predict_torque_sequence(model, sequences, positions, m_frames=2):
     """
-    对序列进行预测
+    对序列进行torque回归预测
     
     Args:
-        model: 训练好的模型
+        model: 训练好的回归模型
         sequences: 输入序列 (n_windows, n_frames, n_features)
+        positions: 位置编码 (n_windows,)
         m_frames: 预测的未来帧数
         
     Returns:
-        predictions: 预测结果
+        predictions: 预测的torque值
     """
-    predictions = model.predict(sequences, verbose=0)
-    
-    if m_frames == 1:
-        # 单输出情况
-        return predictions
-    else:
-        # 多输出情况，返回每个输出的预测结果
-        return predictions
+    predictions = model.predict([sequences, positions], verbose=0)
+    return predictions
 
-def aggregate_predictions(predictions, m_frames=2):
+def aggregate_torque_predictions(predictions, method='mean'):
     """
-    聚合多帧预测结果
+    聚合多个时间窗口的torque预测结果
     
     Args:
-        predictions: 模型预测结果
-        m_frames: 预测帧数
+        predictions: 模型预测结果 (n_windows, m_frames)
+        method: 聚合方法 ('mean', 'median', 'last')
         
     Returns:
-        aggregated_predictions: 聚合后的预测结果
+        aggregated_prediction: 聚合后的预测结果
     """
-    if m_frames == 1:
-        return np.argmax(predictions, axis=1)
+    if method == 'mean':
+        return np.mean(predictions, axis=0)  # 对所有窗口取平均
+    elif method == 'median':
+        return np.median(predictions, axis=0)  # 对所有窗口取中位数
+    elif method == 'last':
+        return predictions[-1]  # 使用最后一个窗口的预测
     else:
-        # 对多个输出取平均
-        avg_predictions = np.mean(predictions, axis=0)  # 对m_frames维度取平均
-        return np.argmax(avg_predictions, axis=1)
+        return np.mean(predictions, axis=0)  # 默认使用平均值
+
+def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, target_length: int = 150):
+    """
+    从H5文件中加载真实的torque值，用于可视化对比
+    
+    Args:
+        file_path (Path): H5文件路径
+        n_frames (int): 输入历史帧数
+        m_frames (int): 预测的未来帧数
+        target_length (int): 目标序列长度
+        
+    Returns:
+        tuple: (truth_values, time_indices) 真实值和对应的时间索引
+    """
+    with h5py.File(file_path, 'r') as f:
+        if '/right_arm_effort' not in f:
+            raise ValueError(f"在文件 {file_path.name} 中没有找到所需的数据结构。")
+        
+        # 加载原始torque数据
+        effort_data = f['/right_arm_effort'][:]  # (seq_len, 7)
+    
+    # 应用与训练时相同的预处理
+    if len(effort_data) > target_length:
+        effort_data = effort_data[:target_length]
+    elif len(effort_data) < target_length:
+        pad_length = target_length - len(effort_data)
+        effort_pad = np.zeros((pad_length, effort_data.shape[1]))
+        effort_data = np.concatenate([effort_data, effort_pad], axis=0)
+    
+    # 提取真实的未来值用于对比
+    # 对于每个预测窗口，提取对应的真实未来m_frames值
+    truth_values = []
+    time_indices = []
+    
+    seq_len = len(effort_data)
+    for start_idx in range(seq_len - n_frames + 1):
+        # 预测的时间点从 start_idx + n_frames 开始
+        future_start = start_idx + n_frames
+        if future_start + m_frames <= seq_len:
+            # 提取真实的未来m_frames值（只取第一维）
+            truth_future = effort_data[future_start:future_start + m_frames, 0]  # 只取第一维
+            truth_values.append(truth_future)
+            # 时间索引对应预测的时间点
+            time_indices.append(list(range(future_start, future_start + m_frames)))
+        else:
+            # 如果超出范围，用零填充
+            remaining_frames = seq_len - future_start
+            if remaining_frames > 0:
+                truth_future = effort_data[future_start:seq_len, 0]
+                # 用零填充不足的帧数
+                truth_future = np.concatenate([truth_future, np.zeros(m_frames - remaining_frames)])
+            else:
+                truth_future = np.zeros(m_frames)
+            truth_values.append(truth_future)
+            time_indices.append(list(range(future_start, future_start + m_frames)))
+    
+    return np.array(truth_values), time_indices
+
+def create_interactive_visualization(truth_values, predictions, time_indices, file_name, output_dir):
+    """
+    创建交互式可视化图表，显示真实值和预测值的对比
+    
+    Args:
+        truth_values: 真实值 (n_windows, m_frames)
+        predictions: 预测值 (n_windows, m_frames)
+        time_indices: 时间索引列表
+        file_name: 文件名
+        output_dir: 输出目录
+    """
+    # 创建输出目录
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # 创建图表
+    fig = go.Figure()
+    
+    # 添加真实值的实线
+    # 将所有真实值连接成一条连续的线
+    all_truth_times = []
+    all_truth_values = []
+    
+    for i, (truth_seq, time_seq) in enumerate(zip(truth_values, time_indices)):
+        all_truth_times.extend(time_seq)
+        all_truth_values.extend(truth_seq)
+    
+    # 去重并排序，创建连续的真实值线
+    time_truth_pairs = list(zip(all_truth_times, all_truth_values))
+    time_truth_pairs = sorted(list(set(time_truth_pairs)))
+    unique_times, unique_truths = zip(*time_truth_pairs)
+    
+    # 添加真实值实线
+    fig.add_trace(go.Scatter(
+        x=unique_times,
+        y=unique_truths,
+        mode='lines',
+        name='Truth Values',
+        line=dict(color='blue', width=3),
+        hovertemplate='Time: %{x}<br>Truth: %{y:.6f}<extra></extra>'
+    ))
+    
+    # 添加每个预测窗口的虚线
+    for i, (pred_seq, time_seq) in enumerate(zip(predictions, time_indices)):
+        fig.add_trace(go.Scatter(
+            x=time_seq,
+            y=pred_seq[:, 0] if pred_seq.ndim > 1 else pred_seq,  # 只取第一维
+            mode='lines',
+            name=f'Prediction Window {i+1}',
+            line=dict(dash='dot', width=1, color=f'rgba(255, 0, 0, 0.6)'),
+            hovertemplate=f'Window {i+1}<br>Time: %{{x}}<br>Prediction: %{{y:.6f}}<extra></extra>',
+            showlegend=(i == 0)  # 只在第一条预测线显示图例
+        ))
+    
+    # 设置图表布局
+    fig.update_layout(
+        title=f'Torque Prediction Visualization - {file_name}',
+        xaxis_title='Time Step',
+        yaxis_title='Torque Value (First Dimension)',
+        hovermode='closest',
+        legend=dict(x=0.02, y=0.98),
+        width=1200,
+        height=600,
+        template='plotly_white'
+    )
+    
+    # 保存交互式HTML文件
+    html_file = output_path / f'{file_name}_visualization.html'
+    fig.write_html(html_file)
+    
+    print(f"交互式可视化已保存至: {html_file}")
+    return html_file
 
 def main(args):
     # --- 1. 解析模型参数 ---
@@ -126,7 +243,7 @@ def main(args):
     # 从模型文件名解析参数
     model_name_stem = model_path.stem
     try:
-        # 解析模型文件名格式：model_type_nX_mY_lenZ_foldW_model 或 model_type_nX_mY_lenZ_model
+        # 解析模型文件名格式：model_type_regressor_nX_mY_lenZ_foldW_model 或 model_type_regressor_nX_mY_lenZ_model
         parts = model_name_stem.split('_')
         
         # 查找n_frames和m_frames参数
@@ -147,7 +264,7 @@ def main(args):
             
     except (IndexError, ValueError) as e:
         print(f"\033[91m错误: 无法从模型文件名 '{model_path.name}' 中推断参数。\033[0m")
-        print(f"文件名应遵循格式: 'modeltype_nX_mY_lenZ_model.h5'")
+        print(f"文件名应遵循格式: 'modeltype_regressor_nX_mY_lenZ_model.h5'")
         return
 
     # 构建scaler路径
@@ -163,8 +280,13 @@ def main(args):
     print(f"模型参数: n_frames={n_frames}, m_frames={m_frames}, target_length={target_length}")
 
     # --- 2. 加载模型和Scaler ---
-    print(f"正在加载模型: {model_path}")
-    model = tf.keras.models.load_model(model_path)
+    print(f"正在加载回归模型: {model_path}")
+    # 解决Keras版本兼容性问题：显式指定自定义对象
+    custom_objects = {
+        'mse': tf.keras.losses.MeanSquaredError(),
+        'mae': tf.keras.metrics.MeanAbsoluteError()
+    }
+    model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
     print(f"正在加载Scaler: {scaler_path}")
     scaler = load(scaler_path)
 
@@ -174,74 +296,55 @@ def main(args):
         print(f"\033[93m在目录 '{input_dir}' 中没有找到任何 .h5 或 .hdf5 文件。\033[0m")
         return
     
-    print(f"找到 {len(h5_files_to_infer)} 个文件。开始批量推理...")
+    print(f"找到 {len(h5_files_to_infer)} 个文件。开始批量torque回归推理...")
 
     # --- 4. 批量推理并保存结果 ---
     with open(output_file, 'w', encoding='utf-8') as f_out:
         # 写入头部信息
-        f_out.write(f"# GRU Sequence Prediction Results\n")
+        f_out.write(f"# GRU Torque Regression Results\n")
         f_out.write(f"# Model: {model_path.name}\n")
         f_out.write(f"# Parameters: n_frames={n_frames}, m_frames={m_frames}\n")
-        f_out.write(f"# Format: filepath - predicted_direction (confidence)\n\n")
+        f_out.write(f"# Aggregation Method: {args.aggregation_method}\n")
+        f_out.write(f"# Format: filepath - predicted_torque_values\n\n")
         
         for file_path in tqdm(h5_files_to_infer, desc="Inferring"):
             try:
                 # 4.1 预处理单个文件
-                sequences, original_labels, valid_positions = load_and_preprocess_single_file(
+                sequences, positions = load_and_preprocess_single_file(
                     file_path, scaler, n_frames, target_length
                 )
                 
-                # 4.2 进行预测
-                predictions = predict_sequence(model, sequences, m_frames)
+                # 4.2 进行torque预测
+                predictions = predict_torque_sequence(model, sequences, positions, m_frames)
                 
-                # 4.3 处理预测结果
-                if m_frames == 1:
-                    # 单输出情况
-                    predicted_classes = np.argmax(predictions, axis=1)
-                    confidence_scores = np.max(predictions, axis=1)
-                else:
-                    # 多输出情况 - 对每个时间步的多个预测取平均
-                    # predictions是一个列表，包含m_frames个预测结果
-                    avg_predictions = np.mean(predictions, axis=0)  # 对m_frames个输出取平均
-                    predicted_classes = np.argmax(avg_predictions, axis=1)
-                    confidence_scores = np.max(avg_predictions, axis=1)
+                # 4.3 聚合预测结果
+                aggregated_prediction = aggregate_torque_predictions(predictions, args.aggregation_method)
                 
-                # 4.4 选择最有信心的预测作为文件的整体预测
-                # 可以选择置信度最高的预测，或者使用多数投票
-                if args.aggregation_method == 'max_confidence':
-                    best_idx = np.argmax(confidence_scores)
-                    final_prediction = predicted_classes[best_idx]
-                    final_confidence = confidence_scores[best_idx]
-                elif args.aggregation_method == 'majority_vote':
-                    # 多数投票
-                    unique, counts = np.unique(predicted_classes, return_counts=True)
-                    final_prediction = unique[np.argmax(counts)]
-                    # 计算该类别的平均置信度
-                    mask = predicted_classes == final_prediction
-                    final_confidence = np.mean(confidence_scores[mask])
-                else:  # 'average'
-                    # 对所有预测取平均
-                    class_probs = np.zeros(3)
-                    if m_frames == 1:
-                        class_probs = np.mean(predictions, axis=0)
-                    else:
-                        class_probs = np.mean(avg_predictions, axis=0)
-                    final_prediction = np.argmax(class_probs)
-                    final_confidence = class_probs[final_prediction]
-                
-                predicted_label = CLASS_MAP.get(final_prediction, 'Unknown')
+                # 4.4 格式化输出
+                torque_values = [f"{val:.6f}" for val in aggregated_prediction]
+                torque_str = "[" + ", ".join(torque_values) + "]"
                 
                 # 4.5 准备输出行
-                output_line = f"{file_path.resolve()} - {predicted_label} ({final_confidence:.3f})\n"
+                output_line = f"{file_path.resolve()} - {torque_str}\n"
                 f_out.write(output_line)
                 
                 # 如果需要详细输出，也可以保存每个时间步的预测
                 if args.detailed_output:
                     f_out.write(f"  Detailed predictions for {file_path.name}:\n")
-                    for i, (pos, pred_class, conf) in enumerate(zip(valid_positions, predicted_classes, confidence_scores)):
-                        pred_label = CLASS_MAP.get(pred_class, 'Unknown')
-                        f_out.write(f"    Position {pos}: {pred_label} ({conf:.3f})\n")
+                    for i, pred in enumerate(predictions):
+                        pred_values = [f"{val:.6f}" for val in pred]
+                        pred_str = "[" + ", ".join(pred_values) + "]"
+                        f_out.write(f"    Window {i}: {pred_str}\n")
                     f_out.write("\n")
+
+                # 5. 加载真实值并进行可视化
+                if args.visualize:
+                    truth_values, time_indices = load_truth_values_from_file(
+                        file_path, n_frames, m_frames, target_length
+                    )
+                    create_interactive_visualization(
+                        truth_values, predictions, time_indices, file_path.stem, args.output_dir
+                    )
 
             except Exception as e:
                 error_line = f"{file_path.resolve()} - ERROR: {e}\n"
@@ -249,25 +352,29 @@ def main(args):
                 tqdm.write(f"\033[91m处理文件 {file_path.name} 时出错: {e}\033[0m")
 
     print("\n" + "="*50)
-    print("      GRU序列预测推理完成")
+    print("      GRU Torque回归推理完成")
     print("="*50)
     print(f"结果已保存至: {output_file.resolve()}")
     print("="*50)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Perform GRU-based sequence prediction inference on H5 files.")
+    parser = argparse.ArgumentParser(description="Perform GRU-based torque regression inference on H5 files.")
     
     parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to the saved Keras model file (e.g., 'checkpoints/gru_n10_m2_len150_model.h5').")
+                        help="Path to the saved Keras regression model file (e.g., 'checkpoints/gru_regressor_n10_m2_len150_model.h5').")
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Path to the directory containing H5 files for inference.")
-    parser.add_argument("--output_file", type=str, default="output/inference_results.txt",
-                        help="Path to save the inference results.")
-    parser.add_argument("--aggregation_method", type=str, default="max_confidence", 
-                        choices=["max_confidence", "majority_vote", "average"],
-                        help="Method to aggregate multiple predictions per file.")
+    parser.add_argument("--output_file", type=str, default="output/torque_inference_results.txt",
+                        help="Path to save the torque inference results.")
+    parser.add_argument("--aggregation_method", type=str, default="mean", 
+                        choices=["mean", "median", "last"],
+                        help="Method to aggregate multiple window predictions.")
     parser.add_argument("--detailed_output", action="store_true",
-                        help="Include detailed predictions for each time step.")
+                        help="Include detailed predictions for each time window.")
+    parser.add_argument("--visualize", action="store_true",
+                        help="Generate interactive visualization HTML files.")
+    parser.add_argument("--output_dir", type=str, default="output",
+                        help="Directory to save visualization HTML files.")
 
     args = parser.parse_args()
     main(args)

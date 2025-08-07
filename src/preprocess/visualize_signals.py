@@ -19,7 +19,7 @@ from preprocess import TorqueDataPreprocessor
 
 
 def visualize_signal_analysis(file_path: str, preprocessor: TorqueDataPreprocessor, 
-                            save_dir: str = "signal_analysis"):
+                            save_dir: str = "output/signal_analysis"):
     """
     可视化单个文件的信号分析过程
     
