@@ -355,7 +355,7 @@ if __name__ == '__main__':
                         help="Number of output frames (future frames to predict).")
     
     # 训练相关参数
-    parser.add_argument("--epochs", type=int, default=2000,
+    parser.add_argument("--epochs", type=int, default=200,
                         help="Maximum number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Training batch size.")
