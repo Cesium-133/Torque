@@ -12,7 +12,7 @@ MODEL_TYPE="gru"
 
 # 时序预测参数
 N_FRAMES=15        # 输入的历史帧数（过去n帧）
-M_FRAMES=1        ## 预测的未来帧数（未来m帧）
+M_FRAMES=15        ## 预测的未来帧数（未来m帧）
 
 # 训练参数
 EPOCHS=500         # 最大训练轮次 (EarlyStopping 可能会提前终止)

@@ -79,9 +79,6 @@ def predict_torque_sequence(model, sequences, positions, m_frames=2):
         predictions: 预测的torque值
     """
     predictions = model.predict([sequences, positions], verbose=0)
-    print(f"🔍 Debug: model prediction shape = {predictions.shape}")
-    print(f"🔍 Debug: prediction range - min: {predictions.min():.6f}, max: {predictions.max():.6f}, mean: {predictions.mean():.6f}")
-    print(f"🔍 Debug: first few predictions = {predictions[:3].flatten()}")
     return predictions
 
 def aggregate_torque_predictions(predictions, method='mean'):
@@ -133,10 +130,6 @@ def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, t
         effort_pad = np.zeros((pad_length, effort_data.shape[1]))
         effort_data = np.concatenate([effort_data, effort_pad], axis=0)
     
-    # 🚨 重要修复：训练时目标值y_windows是从原始数据提取的（未标准化）
-    # 所以推理时的真实值也应该使用原始尺度，不进行标准化
-    print("🔧 修复：使用原始尺度的真实值，与训练时的目标值保持一致")
-    print(f"🔍 Debug: 原始数据范围 - min: {effort_data[:, 0].min():.6f}, max: {effort_data[:, 0].max():.6f}, mean: {effort_data[:, 0].mean():.6f}")
     effort_data_scaled = effort_data  # 不进行标准化
     
     # 提取真实的未来值用于对比
@@ -169,7 +162,6 @@ def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, t
     
     # 确保返回的数组有正确的形状
     truth_values = np.array(truth_values)
-    print(f"Debug: truth_values.shape after processing = {truth_values.shape}")
     
     # 当m_frames=1时，确保形状是(n_windows, 1)而不是(n_windows,)
     if truth_values.ndim == 1:
@@ -191,10 +183,7 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     # 创建输出目录
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    # 处理预测数据的维度问题
-    print(f"Debug: predictions.shape = {predictions.shape}")
-    print(f"Debug: truth_values.shape = {truth_values.shape}")
+
     
     # 确保预测数据有正确的形状
     if predictions.ndim == 1:
