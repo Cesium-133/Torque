@@ -79,6 +79,7 @@ def predict_torque_sequence(model, sequences, positions, m_frames=2):
         predictions: 预测的torque值
     """
     predictions = model.predict([sequences, positions], verbose=0)
+    #
     return predictions
 
 def aggregate_torque_predictions(predictions, method='mean'):
