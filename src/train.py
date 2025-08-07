@@ -12,10 +12,34 @@ from tqdm import tqdm
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 # 从我们自己的model.py中导入模型创建函数
 from model import create_torque_regressor, get_optimizer, get_lr_scheduler
+
+class TorqueDataset(Dataset):
+    """PyTorch数据集类，用于处理时序回归数据"""
+    
+    def __init__(self, X, y, positions):
+        """
+        Args:
+            X: 输入序列数据 (n_samples, n_frames, n_features)
+            y: 目标torque值 (n_samples, m_frames)
+            positions: 位置编码 (n_samples,)
+        """
+        self.X = torch.FloatTensor(X)
+        self.y = torch.FloatTensor(y)
+        self.positions = torch.LongTensor(positions)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx], self.positions[idx]
 
 def create_sliding_window_samples(sequences, n_frames=10, m_frames=2, step_size=1):
     """
@@ -114,6 +138,55 @@ def load_data_from_directory(dir_path: Path, target_length: int = 150):
     print(f"数据加载完成。sequences.shape: {sequences.shape}")
     return sequences
 
+def train_epoch(model, train_loader, criterion, optimizer, device):
+    """训练一个epoch"""
+    model.train()
+    total_loss = 0.0
+    total_samples = 0
+    
+    for batch_x, batch_y, batch_pos in train_loader:
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        batch_pos = batch_pos.to(device)
+        
+        optimizer.zero_grad()
+        
+        # 前向传播
+        outputs = model(batch_x, batch_pos)
+        loss = criterion(outputs, batch_y)
+        
+        # 反向传播
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item() * batch_x.size(0)
+        total_samples += batch_x.size(0)
+    
+    return total_loss / total_samples
+
+def validate_epoch(model, val_loader, criterion, device):
+    """验证一个epoch"""
+    model.eval()
+    total_loss = 0.0
+    total_mae = 0.0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for batch_x, batch_y, batch_pos in val_loader:
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+            batch_pos = batch_pos.to(device)
+            
+            outputs = model(batch_x, batch_pos)
+            loss = criterion(outputs, batch_y)
+            mae = nn.L1Loss()(outputs, batch_y)
+            
+            total_loss += loss.item() * batch_x.size(0)
+            total_mae += mae.item() * batch_x.size(0)
+            total_samples += batch_x.size(0)
+    
+    return total_loss / total_samples, total_mae / total_samples
+
 def train_with_cross_validation(X_scaled, y_windows, positions, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES):
     """使用交叉验证进行训练（回归任务）"""
     N_FOLDS = 5
@@ -191,7 +264,18 @@ def train_simple_split(X_scaled, y_windows, positions, args, model_name_base, sa
 def train_single_fold(X_train, X_val, y_train, y_val, pos_train, pos_val, args, model_name_base, saved_models_dir, logs_dir, n_features, N_FRAMES, M_FRAMES, fold=None):
     """训练单个fold或单次训练（回归任务）"""
     
-    # 构建和编译模型
+    # 设置设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+    
+    # 创建数据集和数据加载器
+    train_dataset = TorqueDataset(X_train, y_train, pos_train)
+    val_dataset = TorqueDataset(X_val, y_val, pos_val)
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    
+    # 构建模型
     model = create_torque_regressor(
         input_shape=(N_FRAMES, n_features),
         output_dim=M_FRAMES,
@@ -199,69 +283,99 @@ def train_single_fold(X_train, X_val, y_train, y_val, pos_train, pos_val, args, 
         n_frames=N_FRAMES,
         m_frames=M_FRAMES
     )
+    model = model.to(device)
     
     # 获取优化器和学习率调度器
-    optimizer = get_optimizer(args.optimizer, args.learning_rate)
-    lr_scheduler = get_lr_scheduler(patience=args.lr_patience)
+    optimizer = get_optimizer(model, args.optimizer, args.learning_rate)
+    scheduler = get_lr_scheduler(optimizer, patience=args.lr_patience)
     
-    # 编译模型 - 使用MSE损失函数
-    model.compile(
-        optimizer=optimizer,
-        loss='mse',
-        metrics=['mae']
-    )
+    # 损失函数
+    criterion = nn.MSELoss()
     
     if fold is None or fold == 0:  # 只在第一折或单次训练时显示模型结构
-        model.summary()
+        print(f"模型结构:")
+        print(model)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"总参数数量: {total_params:,}")
+        print(f"可训练参数数量: {trainable_params:,}")
     
-    # 设置回调函数
+    # 设置日志和模型保存路径
     if fold is not None:
         log_dir = logs_dir / "fit" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_fold{fold+1}"
-        model_path = saved_models_dir / f"{model_name_base}_fold{fold+1}_model.h5"
+        model_path = saved_models_dir / f"{model_name_base}_fold{fold+1}_model.pth"
     else:
         log_dir = logs_dir / "fit" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_simple_split"
-        model_path = saved_models_dir / f"{model_name_base}_model.h5"
+        model_path = saved_models_dir / f"{model_name_base}_model.pth"
     
-    callbacks_list = [
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=model_path,
-            monitor='val_loss',
-            save_best_only=True,
-            verbose=1,
-            mode='min'
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=args.early_stopping_patience,
-            verbose=1,
-            mode='min',
-            restore_best_weights=True
-        ),
-        tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1),
-        lr_scheduler
-    ]
+    # TensorBoard writer
+    writer = SummaryWriter(log_dir)
     
-    # 训练模型
+    # 训练循环
     fold_text = f"Fold {fold + 1}" if fold is not None else "模型"
     print(f"\n开始训练 {fold_text}（回归任务）...")
-    history = model.fit(
-        [X_train, pos_train], y_train,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        validation_data=([X_val, pos_val], y_val),
-        callbacks=callbacks_list,
-        verbose=1
-    )
     
-    # 评估模型
-    print(f"\n评估 {fold_text}...")
-    val_loss, val_mae = model.evaluate([X_val, pos_val], y_val, verbose=0)
+    best_val_loss = float('inf')
+    patience_counter = 0
     
-    # 清理内存
-    del model
-    tf.keras.backend.clear_session()
+    for epoch in range(args.epochs):
+        # 训练
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        
+        # 验证
+        val_loss, val_mae = validate_epoch(model, val_loader, criterion, device)
+        
+        # 学习率调度
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # 记录到TensorBoard
+        writer.add_scalar('Loss/Train', train_loss, epoch)
+        writer.add_scalar('Loss/Val', val_loss, epoch)
+        writer.add_scalar('MAE/Val', val_mae, epoch)
+        writer.add_scalar('LR', current_lr, epoch)
+        
+        # 打印进度
+        if epoch % 10 == 0 or epoch == args.epochs - 1:
+            print(f"Epoch {epoch+1}/{args.epochs}: "
+                  f"Train Loss: {train_loss:.4f}, "
+                  f"Val Loss: {val_loss:.4f}, "
+                  f"Val MAE: {val_mae:.4f}, "
+                  f"LR: {current_lr:.6f}")
+        
+        # 保存最佳模型
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_val_mae = val_mae
+            patience_counter = 0
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss,
+                'val_mae': val_mae,
+                'model_config': {
+                    'input_shape': (N_FRAMES, n_features),
+                    'output_dim': M_FRAMES,
+                    'model_type': args.model_type,
+                    'n_frames': N_FRAMES,
+                    'm_frames': M_FRAMES
+                }
+            }, model_path)
+        else:
+            patience_counter += 1
+        
+        # 早停
+        if patience_counter >= args.early_stopping_patience:
+            print(f"早停于 epoch {epoch+1}")
+            break
     
-    return val_loss, val_mae
+    writer.close()
+    
+    print(f"\n{fold_text}训练完成！最佳验证MSE: {best_val_loss:.4f}, 最佳验证MAE: {best_val_mae:.4f}")
+    print(f"模型已保存至: {model_path}")
+    
+    return best_val_loss, best_val_mae
 
 def print_cv_results(fold_results, model_name_base, saved_models_dir, args, N_FRAMES, M_FRAMES):
     """打印交叉验证结果（回归任务）"""

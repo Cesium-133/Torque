@@ -6,11 +6,15 @@ import numpy as np
 import argparse
 from pathlib import Path
 from joblib import load
-import tensorflow as tf
+import torch
+import torch.nn as nn
 from tqdm import tqdm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.offline as pyo
+
+# 从我们自己的model.py中导入模型创建函数
+from model import create_torque_regressor
 
 def load_and_preprocess_single_file(file_path: Path, scaler, n_frames: int, target_length: int = 150):
     """
@@ -65,7 +69,7 @@ def load_and_preprocess_single_file(file_path: Path, scaler, n_frames: int, targ
     
     return sequences_final, positions
 
-def predict_torque_sequence(model, sequences, positions, m_frames=2):
+def predict_torque_sequence(model, sequences, positions, device, m_frames=2):
     """
     对序列进行torque回归预测
     
@@ -73,12 +77,22 @@ def predict_torque_sequence(model, sequences, positions, m_frames=2):
         model: 训练好的回归模型
         sequences: 输入序列 (n_windows, n_frames, n_features)
         positions: 位置编码 (n_windows,)
+        device: PyTorch设备
         m_frames: 预测的未来帧数
         
     Returns:
         predictions: 预测的torque值
     """
-    predictions = model.predict([sequences, positions], verbose=0)
+    model.eval()
+    
+    # 转换为PyTorch张量
+    sequences_tensor = torch.FloatTensor(sequences).to(device)
+    positions_tensor = torch.LongTensor(positions).to(device)
+    
+    with torch.no_grad():
+        predictions = model(sequences_tensor, positions_tensor)
+        predictions = predictions.cpu().numpy()
+    
     return predictions
 
 def aggregate_torque_predictions(predictions, method='mean'):
@@ -266,6 +280,35 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     print(f"交互式可视化已保存至: {html_file}")
     return html_file
 
+def load_pytorch_model(model_path, model_config, device):
+    """
+    加载PyTorch模型
+    
+    Args:
+        model_path: 模型文件路径
+        model_config: 模型配置
+        device: PyTorch设备
+        
+    Returns:
+        model: 加载的模型
+    """
+    # 创建模型
+    model = create_torque_regressor(
+        input_shape=model_config['input_shape'],
+        output_dim=model_config['output_dim'],
+        model_type=model_config['model_type'],
+        n_frames=model_config['n_frames'],
+        m_frames=model_config['m_frames']
+    )
+    
+    # 加载模型权重
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    
+    return model
+
 def main(args):
     # --- 1. 解析模型参数 ---
     model_path = Path(args.model_path)
@@ -299,7 +342,7 @@ def main(args):
             
     except (IndexError, ValueError) as e:
         print(f"\033[91m错误: 无法从模型文件名 '{model_path.name}' 中推断参数。\033[0m")
-        print(f"文件名应遵循格式: 'modeltype_regressor_nX_mY_lenZ_model.h5'")
+        print(f"文件名应遵循格式: 'modeltype_regressor_nX_mY_lenZ_model.pth'")
         return
 
     # 构建scaler路径
@@ -314,14 +357,33 @@ def main(args):
 
     print(f"模型参数: n_frames={n_frames}, m_frames={m_frames}, target_length={target_length}")
 
-    # --- 2. 加载模型和Scaler ---
+    # --- 2. 设置设备和加载模型 ---
+    device = torch.device('cpu')  # 推理时使用CPU
+    print(f"使用设备: {device}")
+    
     print(f"正在加载回归模型: {model_path}")
-    # 解决Keras版本兼容性问题：显式指定自定义对象
-    custom_objects = {
-        'mse': tf.keras.losses.MeanSquaredError(),
-        'mae': tf.keras.metrics.MeanAbsoluteError()
-    }
-    model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+    
+    # 加载模型配置（如果存在）
+    try:
+        checkpoint = torch.load(model_path, map_location=device)
+        if 'model_config' in checkpoint:
+            model_config = checkpoint['model_config']
+        else:
+            # 如果没有配置，使用默认配置
+            model_config = {
+                'input_shape': (n_frames, 7),
+                'output_dim': m_frames,
+                'model_type': 'gru',
+                'n_frames': n_frames,
+                'm_frames': m_frames
+            }
+    except Exception as e:
+        print(f"\033[91m加载模型配置失败: {e}\033[0m")
+        return
+    
+    # 加载模型
+    model = load_pytorch_model(model_path, model_config, device)
+    
     print(f"正在加载Scaler: {scaler_path}")
     scaler = load(scaler_path)
 
@@ -350,7 +412,7 @@ def main(args):
                 )
                 
                 # 4.2 进行torque预测
-                predictions = predict_torque_sequence(model, sequences, positions, m_frames)
+                predictions = predict_torque_sequence(model, sequences, positions, device, m_frames)
                 
                 # 4.3 聚合预测结果
                 aggregated_prediction = aggregate_torque_predictions(predictions, args.aggregation_method)
@@ -396,7 +458,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Perform GRU-based torque regression inference on H5 files.")
     
     parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to the saved Keras regression model file (e.g., 'checkpoints/gru_regressor_n10_m2_len150_model.h5').")
+                        help="Path to the saved PyTorch regression model file (e.g., 'checkpoints/gru_regressor_n10_m2_len150_model.pth').")
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Path to the directory containing H5 files for inference.")
     parser.add_argument("--output_file", type=str, default="output/torque_inference_results.txt",
