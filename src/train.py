@@ -202,7 +202,6 @@ def train_single_fold(X_train, X_val, y_train, y_val, pos_train, pos_val, args, 
     
     # 获取优化器和学习率调度器
     optimizer = get_optimizer(args.optimizer, args.learning_rate)
-    lr_scheduler = get_lr_scheduler(patience=args.lr_patience)
     
     # 编译模型 - 使用MSE损失函数
     model.compile(
@@ -230,15 +229,7 @@ def train_single_fold(X_train, X_val, y_train, y_val, pos_train, pos_val, args, 
             verbose=1,
             mode='min'
         ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=args.early_stopping_patience,
-            verbose=1,
-            mode='min',
-            restore_best_weights=True
-        ),
-        tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1),
-        lr_scheduler
+        tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
     ]
     
     # 训练模型
@@ -364,7 +355,7 @@ if __name__ == '__main__':
                         help="Number of output frames (future frames to predict).")
     
     # 训练相关参数
-    parser.add_argument("--epochs", type=int, default=200,
+    parser.add_argument("--epochs", type=int, default=2000,
                         help="Maximum number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=128,
                         help="Training batch size.")
@@ -384,7 +375,7 @@ if __name__ == '__main__':
                         help="Use 5-fold cross validation for training (default: True).")
     parser.add_argument("--no_cross_validation", dest="use_cross_validation", action="store_false",
                         help="Use simple train-validation split instead of cross validation.")
-    parser.add_argument("--train_split", type=float, default=0.8,
+    parser.add_argument("--train_split", type=float, default=0.99999,
                         help="Training set ratio when not using cross validation (default: 0.8).")
     
     args = parser.parse_args()

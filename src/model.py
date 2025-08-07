@@ -34,11 +34,9 @@ def create_torque_regressor(input_shape=(10, 7), output_dim=2, model_type='gru',
         print(f"Building GRU regression model for sequence prediction...")
         print(f"Input: past {n_frames} frames -> Output: future {m_frames} torque values")
         
-        # 第一层GRU，返回序列以便后续层处理
-        x = GRU(units=64, return_sequences=True, dropout=0.2, recurrent_dropout=0.2, name='gru_1')(x)
         
-        # 第二层GRU，只返回最后的输出
-        gru_output = GRU(units=32, return_sequences=False, dropout=0.2, recurrent_dropout=0.2, name='gru_2')(x)
+        x = GRU(units=64, return_sequences=True, dropout=0.0, recurrent_dropout=0.0, name='gru_1')(x)
+        gru_output = GRU(units=32, return_sequences=False, dropout=0.0, recurrent_dropout=0.0, name='gru_2')(x)
         
         # Position Embedding: 将窗口位置编码映射到与GRU输出相同的维度
         # 假设最大位置数为1000，可以根据实际需要调整
@@ -49,12 +47,12 @@ def create_torque_regressor(input_shape=(10, 7), output_dim=2, model_type='gru',
         x = Add(name='add_position_embedding')([gru_output, position_embedding])
         
         # Dropout防止过拟合
-        x = Dropout(0.3, name='dropout_1')(x)
+        #x = Dropout(0.3, name='dropout_1')(x)
         
         # 全连接层作为预测头
-        x = Dense(64, activation='relu', name='dense_1')(x)
-        x = Dropout(0.2, name='dropout_2')(x)
-        x = Dense(32, activation='relu', name='dense_2')(x)
+        x = Dense(512, activation='relu', name='dense_1')(x)
+        #x = Dropout(0.2, name='dropout_2')(x)
+        x = Dense(256, activation='relu', name='dense_2')(x)
 
     elif model_type == 'lstm':
         # 方案 C: LSTM (保留兼容性)
@@ -108,18 +106,18 @@ def create_torque_classifier(input_shape=(10, 7), num_classes=3, model_type='gru
         print(f"Input: past {n_frames} frames -> Output: future {m_frames} frames")
         
         # 第一层GRU，返回序列以便后续层处理
-        x = GRU(units=64, return_sequences=True, dropout=0.2, recurrent_dropout=0.2, name='gru_1')(x)
+        x = GRU(units=64, return_sequences=True, name='gru_1')(x)
         
         # 第二层GRU，只返回最后的输出
-        x = GRU(units=32, return_sequences=False, dropout=0.2, recurrent_dropout=0.2, name='gru_2')(x)
+        x = GRU(units=32, return_sequences=False, name='gru_2')(x)
         
         # Dropout防止过拟合
-        x = Dropout(0.3, name='dropout_1')(x)
+        #x = Dropout(0.3, name='dropout_1')(x)
         
         
         # 全连接层
         x = Dense(64, activation='relu', name='dense_1')(x)
-        x = Dropout(0.2, name='dropout_2')(x)
+        #x = Dropout(0.2, name='dropout_2')(x)
         x = Dense(32, activation='relu', name='dense_2')(x)
 
     elif model_type == 'lstm':

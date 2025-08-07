@@ -17,8 +17,8 @@ M_FRAMES=2        # 预测的未来帧数（未来m帧）
 # 训练参数
 EPOCHS=200         # 最大训练轮次 (EarlyStopping 可能会提前终止)
 BATCH_SIZE=32      # 批次大小
-OPTIMIZER="adamw"  # 优化器类型: adam 或 adamw
-LEARNING_RATE=1e-5  # 初始学习率
+OPTIMIZER="adam"  # 优化器类型: adam 或 adamw
+LEARNING_RATE=1e-3  # 初始学习率
 
 # 回调参数
 EARLY_STOPPING_PATIENCE=15  # 早停耐心值
