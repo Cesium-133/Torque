@@ -52,9 +52,9 @@ def create_torque_regressor(input_shape=(10, 7), output_dim=2, model_type='gru',
         x = Dropout(0.3, name='dropout_1')(x)
         
         # 全连接层作为预测头
-        x = Dense(64, activation='relu', name='dense_1')(x)
+        x = Dense(512, activation='relu', name='dense_1')(x)
         x = Dropout(0.2, name='dropout_2')(x)
-        x = Dense(32, activation='relu', name='dense_2')(x)
+        x = Dense(64, activation='relu', name='dense_2')(x)
 
     elif model_type == 'lstm':
         # 方案 C: LSTM (保留兼容性)
@@ -114,7 +114,7 @@ def create_torque_classifier(input_shape=(10, 7), num_classes=3, model_type='gru
         x = GRU(units=32, return_sequences=False, dropout=0.2, recurrent_dropout=0.2, name='gru_2')(x)
         
         # Dropout防止过拟合
-        x = Dropout(0.3, name='dropout_1')(x)
+        #x = Dropout(0.3, name='dropout_1')(x)
         
         
         # 全连接层

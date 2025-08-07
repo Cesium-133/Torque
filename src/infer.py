@@ -79,7 +79,9 @@ def predict_torque_sequence(model, sequences, positions, m_frames=2):
         predictions: 预测的torque值
     """
     predictions = model.predict([sequences, positions], verbose=0)
-    #
+    print(f"🔍 Debug: model prediction shape = {predictions.shape}")
+    print(f"🔍 Debug: prediction range - min: {predictions.min():.6f}, max: {predictions.max():.6f}, mean: {predictions.mean():.6f}")
+    print(f"🔍 Debug: first few predictions = {predictions[:3].flatten()}")
     return predictions
 
 def aggregate_torque_predictions(predictions, method='mean'):
@@ -111,6 +113,7 @@ def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, t
         n_frames (int): 输入历史帧数
         m_frames (int): 预测的未来帧数
         target_length (int): 目标序列长度
+        注意：真实值使用原始尺度，与训练时的目标值保持一致
         
     Returns:
         tuple: (truth_values, time_indices) 真实值和对应的时间索引
@@ -130,18 +133,24 @@ def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, t
         effort_pad = np.zeros((pad_length, effort_data.shape[1]))
         effort_data = np.concatenate([effort_data, effort_pad], axis=0)
     
+    # 🚨 重要修复：训练时目标值y_windows是从原始数据提取的（未标准化）
+    # 所以推理时的真实值也应该使用原始尺度，不进行标准化
+    print("🔧 修复：使用原始尺度的真实值，与训练时的目标值保持一致")
+    print(f"🔍 Debug: 原始数据范围 - min: {effort_data[:, 0].min():.6f}, max: {effort_data[:, 0].max():.6f}, mean: {effort_data[:, 0].mean():.6f}")
+    effort_data_scaled = effort_data  # 不进行标准化
+    
     # 提取真实的未来值用于对比
     # 对于每个预测窗口，提取对应的真实未来m_frames值
     truth_values = []
     time_indices = []
     
-    seq_len = len(effort_data)
+    seq_len = len(effort_data_scaled)
     for start_idx in range(seq_len - n_frames + 1):
         # 预测的时间点从 start_idx + n_frames 开始
         future_start = start_idx + n_frames
         if future_start + m_frames <= seq_len:
             # 提取真实的未来m_frames值（只取第一维）
-            truth_future = effort_data[future_start:future_start + m_frames, 0]  # 只取第一维
+            truth_future = effort_data_scaled[future_start:future_start + m_frames, 0]  # 只取第一维
             truth_values.append(truth_future)
             # 时间索引对应预测的时间点
             time_indices.append(list(range(future_start, future_start + m_frames)))
@@ -149,15 +158,24 @@ def load_truth_values_from_file(file_path: Path, n_frames: int, m_frames: int, t
             # 如果超出范围，用零填充
             remaining_frames = seq_len - future_start
             if remaining_frames > 0:
-                truth_future = effort_data[future_start:seq_len, 0]
+                truth_future = effort_data_scaled[future_start:seq_len, 0]
                 # 用零填充不足的帧数
-                truth_future = np.concatenate([truth_future, np.zeros(m_frames - remaining_frames)])
+                if m_frames - remaining_frames > 0:
+                    truth_future = np.concatenate([truth_future, np.zeros(m_frames - remaining_frames)])
             else:
                 truth_future = np.zeros(m_frames)
             truth_values.append(truth_future)
             time_indices.append(list(range(future_start, future_start + m_frames)))
     
-    return np.array(truth_values), time_indices
+    # 确保返回的数组有正确的形状
+    truth_values = np.array(truth_values)
+    print(f"Debug: truth_values.shape after processing = {truth_values.shape}")
+    
+    # 当m_frames=1时，确保形状是(n_windows, 1)而不是(n_windows,)
+    if truth_values.ndim == 1:
+        truth_values = truth_values.reshape(-1, 1)
+    
+    return truth_values, time_indices
 
 def create_interactive_visualization(truth_values, predictions, time_indices, file_name, output_dir):
     """
@@ -165,7 +183,7 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     
     Args:
         truth_values: 真实值 (n_windows, m_frames)
-        predictions: 预测值 (n_windows, m_frames)
+        predictions: 预测值 (n_windows, m_frames) 或 (n_windows,) 当m_frames=1时
         time_indices: 时间索引列表
         file_name: 文件名
         output_dir: 输出目录
@@ -173,6 +191,18 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     # 创建输出目录
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    
+    # 处理预测数据的维度问题
+    print(f"Debug: predictions.shape = {predictions.shape}")
+    print(f"Debug: truth_values.shape = {truth_values.shape}")
+    
+    # 确保预测数据有正确的形状
+    if predictions.ndim == 1:
+        # 当m_frames=1时，predictions可能是(n_windows,)，需要reshape为(n_windows, 1)
+        predictions = predictions.reshape(-1, 1)
+    elif predictions.ndim == 2 and predictions.shape[1] == 1:
+        # 已经是正确的形状(n_windows, 1)
+        pass
     
     # 创建图表
     fig = go.Figure()
@@ -183,6 +213,9 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     all_truth_values = []
     
     for i, (truth_seq, time_seq) in enumerate(zip(truth_values, time_indices)):
+        # 确保truth_seq是一维数组
+        if truth_seq.ndim > 1:
+            truth_seq = truth_seq.flatten()
         all_truth_times.extend(time_seq)
         all_truth_values.extend(truth_seq)
     
@@ -203,12 +236,24 @@ def create_interactive_visualization(truth_values, predictions, time_indices, fi
     
     # 添加每个预测窗口的虚线
     for i, (pred_seq, time_seq) in enumerate(zip(predictions, time_indices)):
+        # 处理预测值的维度
+        if pred_seq.ndim > 1:
+            pred_values = pred_seq[:, 0]  # 只取第一维
+        else:
+            pred_values = pred_seq if isinstance(pred_seq, np.ndarray) else [pred_seq]
+        
+        # 确保pred_values和time_seq长度匹配
+        if len(pred_values) != len(time_seq):
+            print(f"Warning: pred_values length {len(pred_values)} != time_seq length {len(time_seq)}")
+            continue
+            
         fig.add_trace(go.Scatter(
             x=time_seq,
-            y=pred_seq[:, 0] if pred_seq.ndim > 1 else pred_seq,  # 只取第一维
-            mode='lines',
+            y=pred_values,
+            mode='lines+markers',  # 添加markers使单点更明显
             name=f'Prediction Window {i+1}',
-            line=dict(dash='dot', width=1, color=f'rgba(255, 0, 0, 0.6)'),
+            line=dict(dash='dot', width=2, color=f'rgba(255, 0, 0, 0.7)'),
+            marker=dict(size=4, color='red'),
             hovertemplate=f'Window {i+1}<br>Time: %{{x}}<br>Prediction: %{{y:.6f}}<extra></extra>',
             showlegend=(i == 0)  # 只在第一条预测线显示图例
         ))
