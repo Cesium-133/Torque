@@ -12,7 +12,7 @@ MODEL_TYPE="gru"
 
 # 时序预测参数
 N_FRAMES=15        # 输入的历史帧数（过去n帧）
-M_FRAMES=1        ## 预测的未来帧数（未来m帧）
+M_FRAMES=15        ## 预测的未来帧数（未来m帧）
 
 # 训练参数
 EPOCHS=500         # 最大训练轮次 (EarlyStopping 可能会提前终止)
@@ -21,7 +21,7 @@ OPTIMIZER="adamw"  # 优化器类型: adam 或 adamw
 LEARNING_RATE=1e-3  # 初始学习率
 
 # 回调参数
-EARLY_STOPPING_PATIENCE=50  # 早停耐心值
+EARLY_STOPPING_PATIENCE=100  # 早停耐心值
 LR_PATIENCE=20             # 学习率调度器耐心值
 
 # 数据文件路径 (相对于项目根目录)

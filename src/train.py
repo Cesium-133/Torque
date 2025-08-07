@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 # 从我们自己的model.py中导入模型创建函数
-from model import create_torque_regressor, get_optimizer, get_lr_scheduler
+from model import create_torque_regressor, get_optimizer
 
 class TorqueDataset(Dataset):
     """PyTorch数据集类，用于处理时序回归数据"""
@@ -287,7 +287,9 @@ def train_single_fold(X_train, X_val, y_train, y_val, pos_train, pos_val, args, 
     
     # 获取优化器和学习率调度器
     optimizer = get_optimizer(model, args.optimizer, args.learning_rate)
-    scheduler = get_lr_scheduler(optimizer, patience=args.lr_patience)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=args.lr_patience, min_lr=1e-7
+    )
     
     # 损失函数
     criterion = nn.MSELoss()

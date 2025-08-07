@@ -163,26 +163,3 @@ def get_optimizer(model, optimizer_type='adamw', learning_rate=0.001):
         return optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     else:
         return optim.Adam(model.parameters(), lr=learning_rate)
-
-def get_lr_scheduler(optimizer, monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7):
-    """
-    获取学习率调度器
-    
-    Args:
-        optimizer: PyTorch优化器
-        monitor (str): 监控的指标（在PyTorch中不直接使用，但保持接口一致性）
-        factor (float): 学习率衰减因子
-        patience (int): 等待轮数
-        min_lr (float): 最小学习率
-        
-    Returns:
-        scheduler: ReduceLROnPlateau调度器
-    """
-    return ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=factor,
-        patience=patience,
-        min_lr=min_lr,
-        verbose=True
-    )

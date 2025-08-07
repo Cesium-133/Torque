@@ -10,11 +10,11 @@
 # 1. 指定你要使用的已训练好的模型文件路径
 #    注意: 文件名应遵循格式 modeltype_nX_mY_lenZ_foldW_model.h5
 #    例如: gru_n10_m2_len150_fold1_model.h5
-MODEL_PATH="checkpoints/gru_regressor_n15_m15_len150_model.h5"
+MODEL_PATH="checkpoints/gru_regressor_n15_m15_len150_model.pth"
 
 # 2. 指定包含待推理文件的目录gru_n50_m2_len150_cpu_cpu_model
 #    脚本会递归查找这个目录下的所有 .h5 文件
-INPUT_DIR="data/processed/test/"
+INPUT_DIR="data/processed/train+val/"
 
 # 3. 指定结果输出文件的路径
 OUTPUT_FILE="output/inference_results_n15m15.txt"
@@ -64,7 +64,7 @@ INFERENCE_CMD="python src/infer.py \
     --aggregation_method \"$AGGREGATION_METHOD\" \
     --detailed_output \
     --visualize \
-    --output_dir \"output/html_visualization_m15_test\""
+    --output_dir \"output/html_visualization_m15_new\""
 
 # 运行推理脚本
 eval $INFERENCE_CMD
